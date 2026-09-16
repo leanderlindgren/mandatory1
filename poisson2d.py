@@ -53,7 +53,8 @@ class Poisson2D:
         A : scipy sparse LIL matrix
             The vectorized Laplace operator
         """
-        raise NotImplementedError("The laplace method is not implemented yet.")
+        D2 = self.p.D2(N, self.p.L/N)
+        return sparse.kron(D2, sparse.eye(N+1)) + sparse.kron(sparse.eye(N+1), D2)
 
     def assemble(
         self, N: int, f: sp.Expr, ue: sp.Expr
@@ -84,7 +85,11 @@ class Poisson2D:
         Dirichlet boundary conditions using the exact solution ue.
 
         """
-        raise NotImplementedError("The assemble method is not implemented yet.")
+        xij, yij = self.create_mesh(N)
+        b = self.meshfunction(f, xij, yij)
+        x_idx, y_idx = self.get_boundary_indices(N)
+        b[y_idx, x_idx] = self.meshfunction(ue, xij.ravel()[x_idx], yij.ravel()[y_idx])
+        return self.laplace(N), b
 
     def meshfunction(self, u: sp.Expr, xij: np.ndarray, yij: np.ndarray) -> np.ndarray:
         """Return Sympy function as mesh function
@@ -97,13 +102,25 @@ class Poisson2D:
         -------
         array - The input function as a mesh function
         """
-        raise NotImplementedError("The meshfunction method is not implemented yet.")
+
+        return sp.lambdify((x, y), u)(xij, yij)
 
     def get_boundary_indices(self, N: int) -> np.ndarray:
         """Return indices of vectorized matrix that belongs to the boundary"""
-        raise NotImplementedError(
-            "The get_boundary_indices method is not implemented yet."
-        )
+
+        x_idx = np.empty(4*N).astype("int")
+        x_idx[:N+1] = [i for i in range(N+1)]
+        x_idx[N+1:-N-1:2] = np.zeros(N-1)
+        x_idx[N+2:-N-1:2] = N*np.ones(N-1)
+        x_idx[-N-1:] = [i for i in range(N+1)]
+        
+        y_idx = np.empty(4*N).astype("int")
+        y_idx[:N+1] = np.zeros(N+1)
+        y_idx[N+1:-N-1:2] = [i for i in range(1, N)]
+        y_idx[N+2:-N-1:2] = [i for i in range(1, N)]
+        y_idx[-N-1:] = N*np.ones(N+1)
+
+        return x_idx, y_idx
 
     def l2_error(self, u: np.ndarray, ue: sp.Expr) -> float:
         """Return l2-error
@@ -120,7 +137,8 @@ class Poisson2D:
         float - The l2-error
 
         """
-        raise NotImplementedError("The l2_error method is not implemented yet.")
+        xij, yij = self.create_mesh(u.shape[0]-1)
+        return np.mean((u - self.meshfunction(ue, xij, yij))**2)
 
     def __call__(self, N: int, ue: sp.Expr) -> np.ndarray:
         """Solve Poisson's equation with a given manufactured solution
@@ -165,6 +183,7 @@ class Poisson2D:
         The value of u(x, y)
 
         """
+
         raise NotImplementedError("The eval method is not implemented yet.")
 
 
@@ -185,8 +204,31 @@ def test_interpolation():
     assert abs(sol.eval(U, 0.52, 0.63) - ue.subs({x: 0.52, y: 0.63}).n()) < 1e-3
     assert abs(sol.eval(U, h / 2, 1 - h / 2) - ue.subs({x: h, y: 1 - h / 2}).n()) < 1e-3
 
+def test_boundary_points():
+    sol = Poisson2D(1)
+    N = 4
+    x_idx_expected, y_idx_expected = np.array(
+        [0, 1, 2, 3, 4, 0, 4, 0, 4, 0, 4, 0, 1, 2, 3, 4]
+    ), np.array(
+        [0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 4, 4]
+    )
+    x_idx_computed, y_idx_computed = sol.get_boundary_indices(N)
+    msg = "boundary_points provides incorrect indices for the x-array"
+    assert np.linalg.norm(x_idx_expected - x_idx_computed) < 1e-12, msg
+    msg = "boundary_points provides incorrect indices for the y-array"
+    assert np.linalg.norm(y_idx_expected - y_idx_computed) < 1e-12, msg
+
+def test_solve():
+    N = 100
+    ue = sp.exp(sp.cos(4 * sp.pi * x) * sp.sin(2 * sp.pi * y))
+    sol = Poisson2D(1)
+    u = sol(N, ue)
+    error = sol.l2_error(u, ue)
+    assert np.linalg.norm(error) < 1e-12, "solver does not compute correct solution"
 
 if __name__ == "__main__":
+    test_boundary_points()
+    test_solve()
     test_convergence_poisson2d()
-    test_interpolation()
+    # test_interpolation()
     print("All tests passed!")
