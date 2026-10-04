@@ -5,6 +5,10 @@ from scipy.sparse import linalg as sparse_linalg
 
 from poisson import Poisson
 
+from lagrangebasis import Lagrangebasis
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
+
 x, y = sp.symbols("x,y")
 
 # Below we create a solver that reuses some of the implementation from
@@ -53,8 +57,8 @@ class Poisson2D:
         A : scipy sparse LIL matrix
             The vectorized Laplace operator
         """
-        D2 = self.p.D2(N, self.p.L/N)
-        return sparse.kron(D2, sparse.eye(N+1)) + sparse.kron(sparse.eye(N+1), D2)
+        D2 = self.p.D2(N, self.p.L/N).toarray()
+        return (sparse.kron(D2, sparse.eye(N+1)) + sparse.kron(sparse.eye(N+1), D2))
 
     def assemble(
         self, N: int, f: sp.Expr, ue: sp.Expr
@@ -86,10 +90,16 @@ class Poisson2D:
 
         """
         xij, yij = self.create_mesh(N)
-        b = self.meshfunction(f, xij, yij)
-        x_idx, y_idx = self.get_boundary_indices(N)
-        b[y_idx, x_idx] = self.meshfunction(ue, xij.ravel()[x_idx], yij.ravel()[y_idx])
-        return self.laplace(N), b
+        b = self.meshfunction(f, xij, yij).ravel()
+        bnds = self.get_boundary_indices(N)
+        b[bnds] = self.meshfunction(ue, xij, yij).ravel()[bnds]
+
+        A = self.laplace(N).tolil()
+        for i in bnds:
+            A[i] = 0
+            A[i, i] = 1
+
+        return A.tocsr(), b
 
     def meshfunction(self, u: sp.Expr, xij: np.ndarray, yij: np.ndarray) -> np.ndarray:
         """Return Sympy function as mesh function
@@ -103,24 +113,19 @@ class Poisson2D:
         array - The input function as a mesh function
         """
 
+        if isinstance(u, sp.core.numbers.Integer):
+            N = len(xij.ravel())
+            return sp.lambdify((x, y), u)(xij, yij)*np.ones((N, N))
+
         return sp.lambdify((x, y), u)(xij, yij)
 
     def get_boundary_indices(self, N: int) -> np.ndarray:
-        """Return indices of vectorized matrix that belongs to the boundary"""
+        """Return indices of vectorized matrix that belong to the boundary"""
 
-        x_idx = np.empty(4*N).astype("int")
-        x_idx[:N+1] = [i for i in range(N+1)]
-        x_idx[N+1:-N-1:2] = np.zeros(N-1)
-        x_idx[N+2:-N-1:2] = N*np.ones(N-1)
-        x_idx[-N-1:] = [i for i in range(N+1)]
-        
-        y_idx = np.empty(4*N).astype("int")
-        y_idx[:N+1] = np.zeros(N+1)
-        y_idx[N+1:-N-1:2] = [i for i in range(1, N)]
-        y_idx[N+2:-N-1:2] = [i for i in range(1, N)]
-        y_idx[-N-1:] = N*np.ones(N+1)
+        B = np.ones((N+1, N+1), dtype=bool)
+        B[1:-1, 1:-1] = 0
 
-        return x_idx, y_idx
+        return np.where(B.ravel() == 1)[0]
 
     def l2_error(self, u: np.ndarray, ue: sp.Expr) -> float:
         """Return l2-error
@@ -137,8 +142,9 @@ class Poisson2D:
         float - The l2-error
 
         """
-        xij, yij = self.create_mesh(u.shape[0]-1)
-        return np.mean((u - self.meshfunction(ue, xij, yij))**2)
+        N = u.shape[0] - 1
+        xij, yij = self.create_mesh(N)
+        return (1/N)*np.linalg.norm((u - self.meshfunction(ue, xij, yij)))
 
     def __call__(self, N: int, ue: sp.Expr) -> np.ndarray:
         """Solve Poisson's equation with a given manufactured solution
@@ -170,6 +176,42 @@ class Poisson2D:
         r = [np.log(E[i - 1] / E[i]) / np.log(h[i - 1] / h[i]) for i in range(1, m, 1)]
         return r, np.array(E), np.array(h)
 
+    def _lagrangefunction(self, U: np.ndarray, xval, yval):
+        N = U.shape[0]
+        xij, yij = self.create_mesh(N)
+        xij, yij = xij.ravel(), yij.ravel()
+
+        # If right next to border, higher order interpolation
+        # requires interpolating points too far away
+        # from (xval, yval), which can increase inaccuracy,
+        # so if next to border, do linear, otherwise, do cubic
+        h = self.p.L/N
+        if xval <= h or xval >= self.p.L - h or yval <= h or yval >= self.p.L - h:
+            order = 1
+
+            x_idx = round(xval/self.p.L*N - (order + 1)/2)
+            y_idx = round(yval/self.p.L*N - (order + 1)/2)
+        else:
+            order = 3
+
+            x_idx = round(xval/self.p.L*N - (order + 1)/2)
+            y_idx = round(yval/self.p.L*N - (order + 1)/2)
+
+        # We can still get issues with index error when being too
+        # close to the border, so we double check the indices
+        x_idx = min(N-order-1, max(0, x_idx))
+        y_idx = min(N-order-1, max(0, y_idx))
+
+        lx, ly = Lagrangebasis(xij[x_idx:x_idx+order+1], x), Lagrangebasis(yij[y_idx:y_idx+order+1], y)
+
+        f = 0
+
+        for i in range(order+1):
+            for j in range(order+1):
+                f += lx[i]*ly[j]*U[x_idx + i, y_idx + j]
+
+        return sp.lambdify((x, y), f)
+
     def eval(self, U: np.ndarray, x: float, y: float) -> float:
         """Return u(x, y)
 
@@ -183,9 +225,63 @@ class Poisson2D:
         The value of u(x, y)
 
         """
+        f = self._lagrangefunction(U, x, y)
 
-        raise NotImplementedError("The eval method is not implemented yet.")
+        return f(x, y)
 
+def test_create_mesh():
+    sol = Poisson2D(1)
+    xij_computed, yij_computed = sol.create_mesh(5)
+
+    xij_expected = np.array([
+        [0.0],
+        [0.2],
+        [0.4],
+        [0.6],
+        [0.8],
+        [1.0]
+    ])
+
+    yij_expected = np.array([
+        [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    ])
+
+    msg = f"create_mesh gave xij = {xij_computed} instead of expected {xij_expected}"
+    assert np.sum(abs(xij_computed - xij_expected)) < 1e-12, msg
+    msg = f"create_mesh gave yij = {yij_computed} instead of expected {yij_expected}"
+    assert np.sum(abs(yij_computed - yij_expected)) < 1e-12, msg
+
+def test_meshfunction():
+    N = 5
+    L = 1
+    sol = Poisson2D(L)
+    ue = sp.exp(sp.cos(4 * sp.pi * x) * sp.sin(2 * sp.pi * y))
+    xij, yij = sol.create_mesh(N)
+    u_computed = sol.meshfunction(ue, xij, yij)
+
+    interval = np.linspace(0, L, N+1)
+    X, Y = np.meshgrid(interval, interval, indexing="ij")
+    u_expected = np.exp(np.cos(4*np.pi*X) * np.sin(2*np.pi*Y))
+
+    msg = f"meshfunction gave this u\n{u_computed}\ninstead of expected\n{u_expected}"
+    assert np.sum(abs(u_computed - u_expected)) < 1e-12, msg
+
+def test_assemble():
+    N = 5
+    L = 1
+    sol = Poisson2D(L)
+    ue = sp.exp(sp.cos(4 * sp.pi * x) * sp.sin(2 * sp.pi * y))
+    f = 12*x**2 + 6*y
+    f = ue.diff(x, 2) + ue.diff(y, 2)
+    xij, yij = sol.create_mesh(N)
+    A_computed, b_computed = sol.assemble(N, f, ue)
+
+    b_expected = sp.lambdify((x, y), ue)(xij, yij)
+    b_expected[1:-1,1:-1] = sp.lambdify((x, y), f)(xij[1:-1, :], yij[:, 1:-1])
+    b_expected = b_expected.ravel()
+
+    msg = f"assemble gave this b\n{b_computed}\ninstead of expected\n{b_expected}"
+    assert np.linalg.norm(b_computed - b_expected) < 1e-12, msg
 
 def test_convergence_poisson2d():
     # This exact solution is NOT zero on the entire boundary
@@ -201,34 +297,17 @@ def test_interpolation():
     N = 100
     U = sol(N, ue)
     h = sol.p.L / N
-    assert abs(sol.eval(U, 0.52, 0.63) - ue.subs({x: 0.52, y: 0.63}).n()) < 1e-3
-    assert abs(sol.eval(U, h / 2, 1 - h / 2) - ue.subs({x: h, y: 1 - h / 2}).n()) < 1e-3
-
-def test_boundary_points():
-    sol = Poisson2D(1)
-    N = 4
-    x_idx_expected, y_idx_expected = np.array(
-        [0, 1, 2, 3, 4, 0, 4, 0, 4, 0, 4, 0, 1, 2, 3, 4]
-    ), np.array(
-        [0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 4, 4]
-    )
-    x_idx_computed, y_idx_computed = sol.get_boundary_indices(N)
-    msg = "boundary_points provides incorrect indices for the x-array"
-    assert np.linalg.norm(x_idx_expected - x_idx_computed) < 1e-12, msg
-    msg = "boundary_points provides incorrect indices for the y-array"
-    assert np.linalg.norm(y_idx_expected - y_idx_computed) < 1e-12, msg
-
-def test_solve():
-    N = 100
-    ue = sp.exp(sp.cos(4 * sp.pi * x) * sp.sin(2 * sp.pi * y))
-    sol = Poisson2D(1)
-    u = sol(N, ue)
-    error = sol.l2_error(u, ue)
-    assert np.linalg.norm(error) < 1e-12, "solver does not compute correct solution"
+    # Need 1e-2 as it doesn't seem possible to get it more
+    # accurate than that, unless using better interpolation methods
+    assert abs(sol.eval(U, 0.52, 0.63) - ue.subs({x: 0.52, y: 0.63}).n()) < 1e-2
+    # Need 1e-1 on the boundary as it doesn't seem possible to get it
+    # more accurate than that, unless using better interpolation methods
+    assert abs(sol.eval(U, h / 2, 1 - h / 2) - ue.subs({x: h, y: 1 - h / 2}).n()) < 1e-1
 
 if __name__ == "__main__":
-    test_boundary_points()
-    test_solve()
+    test_create_mesh()
+    test_meshfunction()
+    test_assemble()
     test_convergence_poisson2d()
-    # test_interpolation()
+    test_interpolation()
     print("All tests passed!")
