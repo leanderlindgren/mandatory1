@@ -26,7 +26,9 @@ class Wave2D:
             The x-coordinates of the mesh
         yij : 2D array
             The y-coordinates of the mesh"""
-        raise NotImplementedError("The create_mesh method is not implemented yet.")
+        xi = np.linspace(0, self.L, N + 1)
+        xij, yij = np.meshgrid(xi, xi, indexing="ij", sparse=True)
+        return xij, yij
 
     def D2(self, N: int) -> sparse.lil_matrix:
         """Return second order differentiation matrix
@@ -40,12 +42,15 @@ class Wave2D:
         D : scipy sparse LIL matrix
             The second order differentiation matrix
         """
-        raise NotImplementedError("The D2 method is not implemented yet.")
+        D2 = sparse.diags([1., -2., 1.], [-1, 0, 1], (N + 1, N + 1), format="lil")
+        D2[0, :4] = 2, -5, 4, -1
+        D2[-1, -4:] = -1, 4, -5, 2
+        return D2
 
     @property
     def w(self):
         """Return the dispersion coefficient"""
-        raise NotImplementedError("The w property is not implemented yet.")
+        return self.c
 
     def ue(self, mx: int, my: int) -> sp.Expr:
         """Return the exact standing wave
@@ -61,7 +66,25 @@ class Wave2D:
         """
         return sp.sin(mx * sp.pi * x) * sp.sin(my * sp.pi * y) * sp.cos(self.w * t)
 
-    def initialize(self, N: int, mx: int, my: int) -> np.ndarray:
+    def meshfunction(self, u: sp.Expr, xij: np.ndarray, yij: np.ndarray, t0: float) -> np.ndarray:
+        """Return Sympy function as mesh function
+
+        Parameters
+        ----------
+        u : Sympy function
+
+        Returns
+        -------
+        array - The input function as a mesh function
+        """
+
+        if isinstance(u, sp.core.numbers.Integer):
+            N = len(xij.ravel())
+            return sp.lambdify((x, y, t), u)(xij, yij, t0)*np.ones((N, N))
+
+        return sp.lambdify((x, y, t), u)(xij, yij, t0)
+
+    def initialize(self, N: int, mx: int, my: int) -> tuple[np.ndarray, np.ndarray]:
         r"""Initialize the solution at $U^{n}$ and $U^{n-1}$
 
         Parameters
@@ -70,13 +93,34 @@ class Wave2D:
             The number of uniform intervals in each direction
         mx, my : int
             Parameters for the standing wave
+
+        Returns
+        -------
+        $(U^{n}, U^{n-1})$ : tuple[ndarray, ndarray]
+            Initialized $U^{n}$ and $U^{n-1}$
         """
-        raise NotImplementedError("The initialize method is not implemented yet.")
+        # The docstring should probably say $U^{1}$ and $U^{0}$ instead
+        xij, yij = self.create_mesh(N, sparse=True)
+
+        U1, U0 = np.zeros((2, N+1, N+1))
+        U0[:] = sp.lambdify((x, y, t), self.ue(mx, my))(xij, yij, 0)
+        U1[:] = U0[:] + 0.5*(self.c*self.dt)**2*(self.D2(N) @ U0 + U0 @ self.D2(N).T)
+        return U1, U0
+
+    @property
+    def dx(self) -> float:
+        """Return the spatial step"""
+        return 1/self.N
 
     @property
     def dt(self) -> float:
         """Return the time step"""
-        raise NotImplementedError("The dt property is not implemented yet.")
+        return self.cfl*self.dx/self.c
+
+    @property
+    def L(self) -> float:
+        """Return spatial length of full spatial interval"""
+        return 1
 
     def l2_error(self, u: np.ndarray, t0: float) -> float:
         """Return l2-error norm
@@ -88,9 +132,15 @@ class Wave2D:
         t0 : number
             The time of the comparison
         """
-        raise NotImplementedError("The l2_error method is not implemented yet.")
+        N = u.shape[0] - 1
+        xij, yij = self.create_mesh(N)
+        return (1/N)*np.linalg.norm(
+            u - self.meshfunction(
+                self.ue(self.mx, self.my), xij, yij, t0
+            )
+        )
 
-    def apply_bcs(self, u: np.ndarray):
+    def apply_bcs(self, U: np.ndarray):
         """Apply boundary conditions to the solution mesh function
 
         Parameters
@@ -98,7 +148,12 @@ class Wave2D:
         u : array
             The solution mesh function
         """
-        raise NotImplementedError("The apply_bcs method is not implemented yet.")
+        # Setting homogeneous Dirichlet boundary conditions
+        U[:, 0] = 0
+        U[:, -1] = 0
+        U[0, :] = 0
+        U[-1, :] = 0
+        return U
 
     def __call__(
         self,
@@ -134,7 +189,41 @@ class Wave2D:
         If store_data > 0, then return a dictionary with key, value = timestep, solution
         If store_data == -1, then return the two-tuple (h, l2-error)
         """
-        raise NotImplementedError("The __call__ method is not implemented yet.")
+        self.N = N
+        self.Nt = Nt
+        self.cfl = cfl
+        self.c = c
+        self.mx = mx
+        self.my = my
+
+        Un, Unm1 = self.initialize(N, mx, my)
+
+        if store_data > 0:
+            solutions = {0: Unm1.copy()}
+            if store_data == 1:
+                solutions[1] = Un.copy()
+        elif store_data == -1:
+            l2_err = []
+
+        D2 = self.D2(N)
+
+        # These range values makes adding solutions to dict easier
+        for t in range(2, Nt+1):
+            Unp1 = 2*Un - Unm1 + (c*self.dt)**2*(D2@Un + Un@(D2.T))
+            Unp1 = self.apply_bcs(Unp1)
+            # not t%store_data is True if t%store_data == 0 because 0 is falsy
+            if store_data > 0 and not t%store_data:
+                solutions[t] = Unp1.copy()
+            elif store_data == -1:
+                l2_err.append(self.l2_error(Unp1, 0))
+            Unm1 = Un
+            Un = Unp1
+
+        if store_data > 0:
+            return solutions
+        elif store_data == -1:
+            h = self.dt
+            return h, l2_err
 
     def convergence_rates(
         self, m: int = 4, cfl: float = 0.1, Nt: int = 10, mx: int = 3, my: int = 3
@@ -201,3 +290,5 @@ def test_convergence_wave2d_neumann():
 def test_exact_wave2d():
     raise NotImplementedError("The test_exact_wave2d function is not implemented yet.")
 
+if __name__ == "__main__":
+    test_convergence_wave2d()
