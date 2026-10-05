@@ -42,8 +42,8 @@ class Wave2D:
             The second order differentiation matrix
         """
         D2 = sparse.diags([1., -2., 1.], [-1, 0, 1], (N + 1, N + 1), format="lil")
-        D2[0, :3] = 0
-        D2[-1, -3:] = 0
+        D2[0, :4] = 2, -5, 4, -1
+        D2[-1, -4:] = -1, 4, -5, 2
         return D2/self.dx**2
 
     @property
@@ -103,6 +103,7 @@ class Wave2D:
 
         U0 = self.meshfunction(self.ue(mx, my), xij, yij, 0)
         U1 = U0 + 0.5*(self.c*self.dt)**2*(self.D2(N)@U0 + U0@self.D2(N).T)
+        U1 = self.apply_bcs(U1)
         return U1, U0
 
     @property
@@ -141,6 +142,10 @@ class Wave2D:
         u : array
             The solution mesh function
         """
+        U[0, :] = 0
+        U[-1, :] = 0
+        U[:, 0] = 0
+        U[:, -1] = 0
         return U
 
     def __call__(
@@ -262,7 +267,7 @@ class Wave2D_Neumann(Wave2D):
         return sp.cos(mx * sp.pi * x) * sp.cos(my * sp.pi * y) * sp.cos(self.w * t)
 
     def apply_bcs(self, U: np.ndarray):
-        return super().apply_bcs(U)
+        return U
 
 def test_convergence_wave2d():
     sol = Wave2D()
