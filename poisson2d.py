@@ -191,11 +191,12 @@ class Poisson2D:
         else:
             order = 3
 
-        x_idx = round(xval/h) - (order)//2
-        y_idx = round(yval/h) - (order)//2
+        x_idx = round(xval/h - order/2)
+        y_idx = round(yval/h - order/2)
 
         # We can still get issues with index error when being too
-        # close to the border, so we double check the indices
+        # close to the border, so we double check the indices, but I'm
+        # pretty sure this only is needed for degrees 4+
         x_idx = min(N-order, max(0, x_idx))
         y_idx = min(N-order, max(0, y_idx))
 
@@ -298,6 +299,10 @@ def test_interpolation():
     U = sp.lambdify((x, y), ue)(xij, yij)
     assert abs(sol.eval(U, 0.52, 0.63) - ue.subs({x: 0.52, y: 0.63}).n()) < 1e-3
     assert abs(sol.eval(U, h / 2, 1 - h / 2) - ue.subs({x: h / 2, y: 1 - h / 2}).n()) < 1e-3
+    # Because we use third degree interpolation when not
+    # literally right next to the border, check what happens
+    # a little bit more than h away from the border
+    assert abs(sol.eval(U, 4*h/3, 1 - 4*h/3) - ue.subs({x: 4*h/3, y: 1 - 4*h/3}).n()) < 1e-3
 
 if __name__ == "__main__":
     test_create_mesh()
