@@ -177,7 +177,7 @@ class Poisson2D:
         return r, np.array(E), np.array(h)
 
     def _lagrangefunction(self, U: np.ndarray, xval, yval):
-        N = U.shape[0]
+        N = U.shape[0] - 1
         xij, yij = self.create_mesh(N)
         xij, yij = xij.ravel(), yij.ravel()
 
@@ -188,19 +188,16 @@ class Poisson2D:
         h = self.p.L/N
         if xval <= h or xval >= self.p.L - h or yval <= h or yval >= self.p.L - h:
             order = 1
-
-            x_idx = round(xval/self.p.L*N - (order + 1)/2)
-            y_idx = round(yval/self.p.L*N - (order + 1)/2)
         else:
             order = 3
 
-            x_idx = round(xval/self.p.L*N - (order + 1)/2)
-            y_idx = round(yval/self.p.L*N - (order + 1)/2)
+        x_idx = round(xval/h) - (order)//2
+        y_idx = round(yval/h) - (order)//2
 
         # We can still get issues with index error when being too
         # close to the border, so we double check the indices
-        x_idx = min(N-order-1, max(0, x_idx))
-        y_idx = min(N-order-1, max(0, y_idx))
+        x_idx = min(N-order, max(0, x_idx))
+        y_idx = min(N-order, max(0, y_idx))
 
         lx, ly = Lagrangebasis(xij[x_idx:x_idx+order+1], x), Lagrangebasis(yij[y_idx:y_idx+order+1], y)
 
@@ -297,12 +294,10 @@ def test_interpolation():
     N = 100
     U = sol(N, ue)
     h = sol.p.L / N
-    # Need 1e-2 as it doesn't seem possible to get it more
-    # accurate than that, unless using better interpolation methods
-    assert abs(sol.eval(U, 0.52, 0.63) - ue.subs({x: 0.52, y: 0.63}).n()) < 1e-2
-    # Need 1e-1 on the boundary as it doesn't seem possible to get it
-    # more accurate than that, unless using better interpolation methods
-    assert abs(sol.eval(U, h / 2, 1 - h / 2) - ue.subs({x: h, y: 1 - h / 2}).n()) < 1e-1
+    xij, yij = sol.create_mesh(N)
+    U = sp.lambdify((x, y), ue)(xij, yij)
+    assert abs(sol.eval(U, 0.52, 0.63) - ue.subs({x: 0.52, y: 0.63}).n()) < 1e-3
+    assert abs(sol.eval(U, h / 2, 1 - h / 2) - ue.subs({x: h / 2, y: 1 - h / 2}).n()) < 1e-3
 
 if __name__ == "__main__":
     test_create_mesh()
